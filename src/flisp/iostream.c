@@ -4,8 +4,8 @@
 #include <string.h>
 #include <assert.h>
 #include <sys/types.h>
-#include <setjmp.h>
 #include "flisp.h"
+#include "utf8proc.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -168,6 +168,7 @@ value_t fl_ioungetc(fl_context_t *fl_ctx, value_t *args, uint32_t nargs)
     if (wc >= 0x80) {
         lerror(fl_ctx, fl_ctx->ArgError, "io_ungetc: unicode not yet supported");
     }
+    s->u_colno -= utf8proc_charwidth(wc);
     return fixnum(ios_ungetc((int)wc,s));
 }
 
@@ -208,6 +209,13 @@ value_t fl_iolineno(fl_context_t *fl_ctx, value_t *args, uint32_t nargs)
     argcount(fl_ctx, "input-port-line", nargs, 1);
     ios_t *s = toiostream(fl_ctx, args[0], "input-port-line");
     return size_wrap(fl_ctx, s->lineno);
+}
+
+value_t fl_iocolno(fl_context_t *fl_ctx, value_t *args, uint32_t nargs)
+{
+    argcount(fl_ctx, "input-port-column", nargs, 1);
+    ios_t *s = toiostream(fl_ctx, args[0], "input-port-column");
+    return size_wrap(fl_ctx, s->u_colno);
 }
 
 value_t fl_ioseek(fl_context_t *fl_ctx, value_t *args, uint32_t nargs)
@@ -382,7 +390,7 @@ value_t stream_to_string(fl_context_t *fl_ctx, value_t *ps)
         ios_trunc(st, 0);
     }
     else {
-        char *b = ios_takebuf(st, &n); n--;
+        char *b = ios_take_buffer(st, &n); n--;
         b[n] = '\0';
         str = cvalue_from_ref(fl_ctx, fl_ctx->stringtype, b, n, fl_ctx->NIL);
         cv_autorelease(fl_ctx, (cvalue_t*)ptr(str));
@@ -424,6 +432,7 @@ static const builtinspec_t iostreamfunc_info[] = {
     { "io.copyuntil", fl_iocopyuntil },
     { "io.tostring!", fl_iotostring },
     { "input-port-line", fl_iolineno },
+    { "input-port-column", fl_iocolno },
 
     { NULL, NULL }
 };

@@ -1,4 +1,4 @@
-// This file is a part of Julia. License is MIT: http://julialang.org/license
+// This file is a part of Julia. License is MIT: https://julialang.org/license
 
 #include <stdlib.h>
 #include <stdarg.h>
@@ -27,6 +27,7 @@
 
 #include "utils.h"
 #include "utf8.h"
+#include "utf8proc.h"
 #include "ios.h"
 #include "timefuncs.h"
 
@@ -426,6 +427,7 @@ size_t ios_write(ios_t *s, const char *data, size_t n)
     else {
         ios_flush(s);
         if (n > MOST_OF(s->maxsize)) {
+            s->fpos = -1;
             _os_write_all(s->fd, data, n, &wrote);
             return wrote;
         }
@@ -565,7 +567,7 @@ int ios_trunc(ios_t *s, size_t size)
 #if !defined(_OS_WINDOWS_)
         if (ftruncate(s->fd, size) == 0)
 #else
-        if (_chsize(s->fd, size) == 0)
+        if (_chsize_s(s->fd, size) == 0)
 #endif
             return 0;
     }
@@ -683,7 +685,7 @@ static void _buf_init(ios_t *s, bufmode_t bm)
     s->size = s->bpos = 0;
 }
 
-char *ios_takebuf(ios_t *s, size_t *psize)
+char *ios_take_buffer(ios_t *s, size_t *psize)
 {
     char *buf;
 
@@ -831,6 +833,19 @@ size_t ios_copyuntil(ios_t *to, ios_t *from, char delim)
     return total;
 }
 
+size_t ios_nchomp(ios_t *from, size_t ntowrite)
+{
+    assert(ntowrite > 0);
+    size_t nchomp;
+    if (ntowrite > 1 && from->buf[from->bpos+ntowrite - 2] == '\r') {
+        nchomp = 2;
+    }
+    else {
+        nchomp = 1;
+    }
+    return nchomp;
+}
+
 static void _ios_init(ios_t *s)
 {
     // put all fields in a sane initial state
@@ -844,6 +859,7 @@ static void _ios_init(ios_t *s)
     s->ndirty = 0;
     s->fpos = -1;
     s->lineno = 1;
+    s->u_colno = 0;
     s->fd = -1;
     s->ownbuf = 1;
     s->ownfd = 0;
@@ -856,19 +872,30 @@ static void _ios_init(ios_t *s)
 /* stream object initializers. we do no allocation. */
 
 #if !defined(_OS_WINDOWS_)
+/*
+ * NOTE: we do not handle system call restart in this function,
+ * please do it manually:
+ *
+ *  do
+ *      open_cloexec(...)
+ *  while (-1 == fd && _enonfatal(errno))
+ */
 static int open_cloexec(const char *path, int flags, mode_t mode)
 {
 #ifdef O_CLOEXEC
-    static int no_cloexec=0;
+    static int no_cloexec = 0;
 
     if (!no_cloexec) {
         set_io_wait_begin(1);
         int fd = open(path, flags | O_CLOEXEC, mode);
         set_io_wait_begin(0);
+
         if (fd != -1)
             return fd;
         if (errno != EINVAL)
             return -1;
+
+        /* O_CLOEXEC not supported. */
         no_cloexec = 1;
     }
 #endif
@@ -900,12 +927,15 @@ ios_t *ios_file(ios_t *s, const char *fname, int rd, int wr, int create, int tru
 #else
     // The mode of the created file is (mode & ~umask), which resolves with
     // default umask to u=rw,g=r,o=r
-    fd = open_cloexec(fname, flags,
-                      S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH);
+    do
+        fd = open_cloexec(fname, flags,
+                          S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH);
+    while (-1 == fd && _enonfatal(errno));
 #endif
-    s = ios_fd(s, fd, 1, 1);
     if (fd == -1)
         goto open_file_err;
+
+    s = ios_fd(s, fd, 1, 1);
     if (!rd)
         s->readable = 0;
     if (!wr)
@@ -1079,6 +1109,10 @@ int ios_getutf8(ios_t *s, uint32_t *pwc)
     c0 = (char)c;
     if ((unsigned char)c0 < 0x80) {
         *pwc = (uint32_t)(unsigned char)c0;
+        if (c == '\n')
+            s->u_colno = 0;
+        else
+            s->u_colno += utf8proc_charwidth(*pwc);
         return 1;
     }
     sz = u8_seqlen(&c0);
@@ -1089,6 +1123,7 @@ int ios_getutf8(ios_t *s, uint32_t *pwc)
         return IOS_EOF;
     size_t i = s->bpos;
     *pwc = u8_nextchar(s->buf, &i);
+    s->u_colno += utf8proc_charwidth(*pwc);
     ios_read(s, buf, sz);
     return 1;
 }
@@ -1137,7 +1172,7 @@ char *ios_readline(ios_t *s)
     ios_mem(&dest, 0);
     ios_copyuntil(&dest, s, '\n');
     size_t n;
-    return ios_takebuf(&dest, &n);
+    return ios_take_buffer(&dest, &n);
 }
 
 extern int vasprintf(char **strp, const char *fmt, va_list ap);

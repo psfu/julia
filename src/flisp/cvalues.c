@@ -242,7 +242,8 @@ static int cvalue_##ctype##_init(fl_context_t *fl_ctx, fltype_t *type, \
     else {                                                             \
         return 1;                                                      \
     }                                                                  \
-    *((fl_##ctype##_t*)dest) = n;                                      \
+    memcpy(jl_assume_aligned(dest, sizeof(void*)), &n,                 \
+            sizeof(fl_##ctype##_t));                                   \
     return 0;                                                          \
 }
 num_init(int8, int32, T_INT8)
@@ -780,7 +781,7 @@ value_t cbuiltin(fl_context_t *fl_ctx, const char *name, builtin_t f)
     cv->type = fl_ctx->builtintype;
     cv->data = &cv->_space[0];
     cv->len = sizeof(value_t);
-    *(void**)cv->data = (void*)f;
+    *(void**)cv->data = (void*)(uintptr_t)f;
 
     value_t sym = symbol(fl_ctx, name);
     ((symbol_t*)ptr(sym))->dlcache = cv;

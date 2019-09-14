@@ -1,4 +1,4 @@
-# This file is a part of Julia. License is MIT: http://julialang.org/license
+# This file is a part of Julia. License is MIT: https://julialang.org/license
 
 export threadid, nthreads, @threads
 
@@ -19,15 +19,22 @@ on `threadid()`.
 nthreads() = Int(unsafe_load(cglobal(:jl_n_threads, Cint)))
 
 function _threadsfor(iter,lbody)
-    fun = gensym("_threadsfor")
     lidx = iter.args[1]         # index
     range = iter.args[2]
     quote
-        function $fun()
-            tid = threadid()
-            r = $(esc(range))
+        local threadsfor_fun
+        let range = $(esc(range))
+        function threadsfor_fun(onethread=false)
+            r = range # Load into local variable
+            lenr = length(r)
             # divide loop iterations among threads
-            len, rem = divrem(length(r), nthreads())
+            if onethread
+                tid = 1
+                len, rem = lenr, 0
+            else
+                tid = threadid()
+                len, rem = divrem(lenr, nthreads())
+            end
             # not enough iterations for all the threads?
             if len == 0
                 if tid > rem
@@ -54,9 +61,17 @@ function _threadsfor(iter,lbody)
                 $(esc(lbody))
             end
         end
-        ccall(:jl_threading_run, Void, (Any,), Core.svec($fun))
+        end
+        if threadid() != 1
+            # only thread 1 can enter/exit _threadedregion
+            Base.invokelatest(threadsfor_fun, true)
+        else
+            ccall(:jl_threading_run, Cvoid, (Any,), threadsfor_fun)
+        end
+        nothing
     end
 end
+
 """
     Threads.@threads
 
@@ -74,10 +89,36 @@ macro threads(args...)
     if !isa(ex, Expr)
         throw(ArgumentError("need an expression argument to @threads"))
     end
-    if is(ex.head, :for)
-        return _threadsfor(ex.args[1],ex.args[2])
+    if ex.head === :for
+        return _threadsfor(ex.args[1], ex.args[2])
     else
         throw(ArgumentError("unrecognized argument to @threads"))
     end
 end
 
+"""
+    Threads.@spawn expr
+
+Create and run a [`Task`](@ref) on any available thread. To wait for the task to
+finish, call [`wait`](@ref) on the result of this macro, or call [`fetch`](@ref)
+to wait and then obtain its return value.
+
+!!! note
+    This feature is currently considered experimental.
+
+!!! compat "Julia 1.3"
+    This macro is available as of Julia 1.3.
+"""
+macro spawn(expr)
+    thunk = esc(:(()->($expr)))
+    var = esc(Base.sync_varname)
+    quote
+        local task = Task($thunk)
+        task.sticky = false
+        if $(Expr(:isdefined, var))
+            push!($var, task)
+        end
+        schedule(task)
+        task
+    end
+end
